@@ -1,19 +1,61 @@
-from flask import Flask, request
-from web3 import Web3
-import requests
+import os
 import json
 import sqlite3
+import requests
+from flask import Flask, request, abort
+from web3 import Web3
+from dotenv import load_dotenv
+
+# --------------------------------------------------
+# Load environment variables
+# --------------------------------------------------
+
+load_dotenv()
+
+ALCHEMY_RPC = os.getenv("ALCHEMY_RPC")
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+ALCHEMY_SIGNATURE = os.getenv("ALCHEMY_SIGNATURE")
+
+if not ALCHEMY_RPC:
+    raise Exception("Missing ALCHEMY_RPC")
+
+if not CONTRACT_ADDRESS:
+    raise Exception("Missing CONTRACT_ADDRESS")
+
+if not TELEGRAM_TOKEN:
+    raise Exception("Missing TELEGRAM_TOKEN")
+
+if not CHAT_ID:
+    raise Exception("Missing CHAT_ID")
+
+# --------------------------------------------------
+# Flask app
+# --------------------------------------------------
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = "BOT_TOKEN"
-CHAT_ID = "CHAT_ID"
+# --------------------------------------------------
+# Web3 setup
+# --------------------------------------------------
 
-ABI = json.load(open("AGIJobManagerABI.json"))
+w3 = Web3(Web3.HTTPProvider(ALCHEMY_RPC))
 
-contract = Web3().eth.contract(abi=ABI)
+with open("AGIJobManagerABI.json") as f:
+    ABI = json.load(f)
+
+contract = w3.eth.contract(
+    address=Web3.to_checksum_address(CONTRACT_ADDRESS),
+    abi=ABI
+)
+
+# --------------------------------------------------
+# Database
+# --------------------------------------------------
 
 db = sqlite3.connect("jobs.db", check_same_thread=False)
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS jobs(
     job_id TEXT,
@@ -24,29 +66,81 @@ CREATE TABLE IF NOT EXISTS jobs(
 )
 """)
 
+db.commit()
+
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
+
 def fetch_ipfs(uri):
+
     if uri.startswith("ipfs://"):
-        uri = uri.replace("ipfs://","https://ipfs.io/ipfs/")
-    r = requests.get(uri)
-    return r.json()
+        uri = uri.replace("ipfs://", "https://ipfs.io/ipfs/")
 
-def send_telegram(msg):
+    try:
+        r = requests.get(uri, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
+
+
+def send_telegram(message):
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url,json={
-        "chat_id":CHAT_ID,
-        "text":msg
-    })
 
-@app.route("/alchemy",methods=["POST"])
+    try:
+        requests.post(
+            url,
+            json={
+                "chat_id": CHAT_ID,
+                "text": message
+            },
+            timeout=10
+        )
+    except Exception:
+        pass
+
+
+def verify_alchemy_signature():
+
+    if not ALCHEMY_SIGNATURE:
+        return True
+
+    incoming = request.headers.get("X-Alchemy-Signature")
+
+    if incoming != ALCHEMY_SIGNATURE:
+        abort(403)
+
+# --------------------------------------------------
+# Routes
+# --------------------------------------------------
+
+@app.route("/")
+def health():
+    return "AGI watcher running"
+
+
+@app.route("/alchemy", methods=["POST"])
 def webhook():
+
+    verify_alchemy_signature()
 
     payload = request.json
 
-    logs = payload["event"]["data"]["block"]["logs"]
+    activities = payload.get("event", {}).get("activity", [])
 
-    for log in logs:
+    for activity in activities:
 
-        decoded = contract.events.JobCreated().process_log(log)
+        log = activity.get("log")
+
+        if not log:
+            continue
+
+        try:
+            decoded = contract.events.JobCreated().process_log(log)
+        except Exception:
+            continue
 
         jobSpecURI = decoded["args"]["_jobSpecURI"]
         payout = decoded["args"]["_payout"]
@@ -58,17 +152,27 @@ def webhook():
         db.execute(
             "INSERT INTO jobs VALUES (?,?,?,?,?)",
             (
-                spec.get("id","unknown"),
-                payout,
+                spec.get("id", "unknown"),
+                str(payout),
                 duration,
                 jobSpecURI,
                 details
             )
         )
+
         db.commit()
+
+        title = spec.get("title", "New Job")
+        summary = spec.get("summary", "")
 
         message = f"""
 🚨 NEW AGI JOB
+
+Title:
+{title}
+
+Summary:
+{summary}
 
 Details:
 {details}
