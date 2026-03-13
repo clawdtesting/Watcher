@@ -1,6 +1,8 @@
 import os
+import json
 import requests
 from dotenv import load_dotenv
+from web3 import Web3
 
 # --------------------------------------------------
 # Load environment variables
@@ -13,13 +15,37 @@ WATCHER_URL = os.getenv("WATCHER_URL")
 CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
 ALCHEMY_SIGNATURE = os.getenv("ALCHEMY_SIGNATURE")
 
+if not ALCHEMY_RPC:
+    raise Exception("Missing ALCHEMY_RPC in .env")
+
+if not WATCHER_URL:
+    raise Exception("Missing WATCHER_URL in .env")
+
+if not CONTRACT_ADDRESS:
+    raise Exception("Missing CONTRACT_ADDRESS in .env")
+
+# --------------------------------------------------
+# Web3
+# --------------------------------------------------
+
+w3 = Web3(Web3.HTTPProvider(ALCHEMY_RPC))
+
+# --------------------------------------------------
+# Block to replay
+# --------------------------------------------------
+
 BLOCK_NUMBER = 24623717
 BLOCK_HEX = hex(BLOCK_NUMBER)
 
-print("Replaying events from block:", BLOCK_NUMBER)
+print("========================================")
+print("Replay block:", BLOCK_NUMBER)
+print("Block hex:", BLOCK_HEX)
+print("Contract:", CONTRACT_ADDRESS)
+print("Watcher:", WATCHER_URL)
+print("========================================")
 
 # --------------------------------------------------
-# Fetch logs
+# Fetch logs from Alchemy
 # --------------------------------------------------
 
 rpc_payload = {
@@ -35,18 +61,59 @@ rpc_payload = {
     ]
 }
 
+print("\nRequesting logs from Alchemy...\n")
+
 rpc = requests.post(ALCHEMY_RPC, json=rpc_payload)
-logs = rpc.json().get("result", [])
+
+if rpc.status_code != 200:
+    print("RPC ERROR:", rpc.text)
+    exit()
+
+data = rpc.json()
+
+logs = data.get("result", [])
 
 print("Logs found:", len(logs))
+print("========================================")
 
 # --------------------------------------------------
-# Replay logs to watcher
+# Print raw logs
 # --------------------------------------------------
 
-for log in logs:
+for i, log in enumerate(logs):
 
-    webhook_payload = {
+    print("\nLOG", i + 1)
+    print("----------------------------------------")
+
+    print("TX:", log["transactionHash"])
+    print("BLOCK:", log["blockNumber"])
+    print("ADDRESS:", log["address"])
+
+    print("\nTOPICS:")
+    for topic in log["topics"]:
+        print(topic)
+
+    print("\nDATA:")
+    print(log["data"])
+
+# --------------------------------------------------
+# Send logs to watcher
+# --------------------------------------------------
+
+print("\n========================================")
+print("Sending logs to watcher")
+print("========================================")
+
+headers = {
+    "Content-Type": "application/json"
+}
+
+if ALCHEMY_SIGNATURE:
+    headers["X-Alchemy-Signature"] = ALCHEMY_SIGNATURE
+
+for i, log in enumerate(logs):
+
+    payload = {
         "event": {
             "activity": [
                 {
@@ -56,13 +123,21 @@ for log in logs:
         }
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "X-Alchemy-Signature": ALCHEMY_SIGNATURE
-    }
+    print("\nSending log", i + 1)
 
-    r = requests.post(WATCHER_URL, json=webhook_payload, headers=headers)
+    r = requests.post(
+        WATCHER_URL,
+        headers=headers,
+        json=payload
+    )
 
-    print("Sent log → watcher | status:", r.status_code)
+    print("Watcher status:", r.status_code)
 
-print("Replay complete.")
+    try:
+        print("Watcher response:", r.json())
+    except:
+        print("Watcher response:", r.text)
+
+print("\n========================================")
+print("Replay finished")
+print("========================================")
