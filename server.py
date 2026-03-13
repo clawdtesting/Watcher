@@ -24,10 +24,6 @@ with open("AGIJobManagerABI.json") as f:
 
 contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=ABI)
 
-# --------------------------------------------------
-# Database
-# --------------------------------------------------
-
 db = sqlite3.connect("events.db", check_same_thread=False)
 
 db.execute("""
@@ -59,25 +55,24 @@ def fetch_ipfs_json(uri):
 
         url = ipfs_to_http(uri)
 
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
 
         if r.status_code == 200:
             return r.json()
 
     except Exception as e:
+
         print("IPFS fetch error:", e)
 
     return {}
 
 
-def format_duration(seconds):
+def format_list(items):
 
-    days = seconds // 86400
+    if not items:
+        return "—"
 
-    if days == 1:
-        return "1 day"
-
-    return f"{days} days"
+    return "\n".join([f"• {i}" for i in items])
 
 
 def send_telegram(message):
@@ -92,7 +87,7 @@ def send_telegram(message):
                 "chat_id": CHAT_ID,
                 "text": message,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": True
+                "disable_web_page_preview": False
             },
             timeout=10
         )
@@ -114,17 +109,17 @@ def verify_alchemy_signature():
     if incoming != ALCHEMY_SIGNATURE:
         abort(403)
 
-# --------------------------------------------------
-# Decode event
-# --------------------------------------------------
 
 def decode_event(log):
 
     for event in contract.events:
 
         try:
+
             decoded = event().process_log(log)
+
             return decoded
+
         except Exception:
             continue
 
@@ -174,8 +169,6 @@ def webhook():
         tx_hash = log.get("transactionHash")
         block_number = log.get("blockNumber")
 
-        print("Event detected:", event_name)
-
         db.execute(
             "INSERT INTO events VALUES (?,?,?,?)",
             (
@@ -188,45 +181,95 @@ def webhook():
 
         db.commit()
 
+        if event_name != "JobCreated":
+            continue
+
         # --------------------------------------------------
-        # Handle JobCreated
+        # Extract on-chain args
         # --------------------------------------------------
 
-        if event_name == "JobCreated":
+        job_id = args.get("jobId")
+        payout = int(args.get("payout"))
+        duration = int(args.get("duration"))
+        job_spec_uri = args.get("jobSpecURI")
 
-            job_id = args.get("jobId")
-            payout = int(args.get("payout"))
-            duration = int(args.get("duration"))
-            job_spec_uri = args.get("jobSpecURI")
+        payout_display = f"{payout / 10**18:,.0f} AGIALPHA"
+        duration_days = duration // 86400
 
-            payout_display = f"{payout / 10**18:,.0f} AGIALPHA"
-            duration_display = format_duration(duration)
+        spec = fetch_ipfs_json(job_spec_uri)
 
-            spec = fetch_ipfs_json(job_spec_uri)
+        name = spec.get("name", "Unknown Job")
+        description = spec.get("description", "")
 
-            summary = spec.get("summary", "No summary provided.")
+        image = spec.get("image", "")
 
-            ipfs_link = ipfs_to_http(job_spec_uri)
-            tx_link = f"https://etherscan.io/tx/{tx_hash}"
+        properties = spec.get("properties", {})
 
-            message = f"""
+        title = properties.get("title", "")
+        summary = properties.get("summary", "")
+        deliverables = format_list(properties.get("deliverables", []))
+        acceptance = format_list(properties.get("acceptanceCriteria", []))
+        requirements = format_list(properties.get("requirements", []))
+
+        payout_prop = properties.get("payoutAGIALPHA", "")
+        employer = properties.get("employer", "")
+
+        attributes = spec.get("attributes", [])
+
+        attr_text = "\n".join(
+            [f"{a.get('trait_type')}: {a.get('value')}" for a in attributes]
+        )
+
+        ipfs_link = ipfs_to_http(job_spec_uri)
+        tx_link = f"https://etherscan.io/tx/{tx_hash}"
+
+        message = f"""
 🚨 <b>NEW AGI JOB</b>
 
-<b>Job ID:</b> {job_id}
-<b>Payout:</b> {payout_display}
-<b>Duration:</b> {duration_display}
+<b>Name</b>
+{name}
 
-<b>Spec link:</b>
-<a href="{ipfs_link}">{ipfs_link}</a>
+<b>Description</b>
+{description}
 
-<b>Spec summarize:</b>
+<b>Image</b>
+<a href="{image}">Open image</a>
+
+<b>Title</b>
+{title}
+
+<b>Summary</b>
 {summary}
 
-<b>Transaction:</b>
+<b>Deliverables</b>
+{deliverables}
+
+<b>Acceptance Criteria</b>
+{acceptance}
+
+<b>Requirements</b>
+{requirements}
+
+<b>Payout</b>
+{payout_display}
+
+<b>Duration</b>
+{duration_days} days
+
+<b>Employer</b>
+{employer}
+
+<b>Attributes</b>
+{attr_text}
+
+<b>Spec</b>
+<a href="{ipfs_link}">{ipfs_link}</a>
+
+<b>Transaction</b>
 <a href="{tx_link}">{tx_hash}</a>
 """
 
-            send_telegram(message)
+        send_telegram(message)
 
     return "ok"
 
