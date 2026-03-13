@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS jobs(
 db.commit()
 
 # --------------------------------------------------
-# Helpers
+# Helper functions
 # --------------------------------------------------
 
 def fetch_ipfs(uri):
@@ -81,9 +81,9 @@ def fetch_ipfs(uri):
         r = requests.get(uri, timeout=10)
         r.raise_for_status()
         return r.json()
-    except Exception:
+    except Exception as e:
+        print("IPFS fetch failed:", e)
         return {}
-
 
 def send_telegram(message):
 
@@ -94,13 +94,13 @@ def send_telegram(message):
             url,
             json={
                 "chat_id": CHAT_ID,
-                "text": message
+                "text": message,
+                "parse_mode": "Markdown"
             },
             timeout=10
         )
-    except Exception:
-        pass
-
+    except Exception as e:
+        print("Telegram send failed:", e)
 
 def verify_alchemy_signature():
 
@@ -120,13 +120,17 @@ def verify_alchemy_signature():
 def health():
     return "AGI watcher running"
 
-
 @app.route("/alchemy", methods=["POST"])
 def webhook():
 
     verify_alchemy_signature()
 
-    payload = request.json
+    payload = request.get_json(silent=True)
+
+    if not payload:
+        return "No JSON payload", 400
+
+    print("Webhook received")
 
     activities = payload.get("event", {}).get("activity", [])
 
@@ -137,56 +141,73 @@ def webhook():
         if not log:
             continue
 
+        print("Processing log:", log)
+
         try:
             decoded = contract.events.JobCreated().process_log(log)
-        except Exception:
+        except Exception as e:
+            print("Log not JobCreated event:", e)
             continue
 
-        jobSpecURI = decoded["args"]["_jobSpecURI"]
-        payout = decoded["args"]["_payout"]
-        duration = decoded["args"]["_duration"]
-        details = decoded["args"]["_details"]
+        try:
+            jobSpecURI = decoded["args"]["_jobSpecURI"]
+            payout_raw = decoded["args"]["_payout"]
+            duration = decoded["args"]["_duration"]
+            details = decoded["args"]["_details"]
+        except Exception as e:
+            print("Event decoding failed:", e)
+            continue
+
+        payout = w3.from_wei(payout_raw, "ether")
 
         spec = fetch_ipfs(jobSpecURI)
 
-        db.execute(
-            "INSERT INTO jobs VALUES (?,?,?,?,?)",
-            (
-                spec.get("id", "unknown"),
-                str(payout),
-                duration,
-                jobSpecURI,
-                details
+        try:
+            db.execute(
+                "INSERT INTO jobs VALUES (?,?,?,?,?)",
+                (
+                    spec.get("id", "unknown"),
+                    str(payout),
+                    duration,
+                    jobSpecURI,
+                    details
+                )
             )
-        )
-
-        db.commit()
+            db.commit()
+        except Exception as e:
+            print("Database write failed:", e)
 
         title = spec.get("title", "New Job")
         summary = spec.get("summary", "")
 
         message = f"""
-🚨 NEW AGI JOB
+🚨 *NEW AGI JOB*
 
-Title:
-{title}
+*Title:* {title}
 
-Summary:
+*Summary:*  
 {summary}
 
-Details:
+*Details:*  
 {details}
 
-Payout:
-{payout}
+*Payout:* {payout}
 
-Duration:
-{duration}
+*Duration:* {duration}
 
-IPFS:
+*IPFS:*  
 {jobSpecURI}
 """
 
         send_telegram(message)
 
     return "ok"
+
+# --------------------------------------------------
+# Render / production startup
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    print("Starting server on port", port)
+    app.run(host="0.0.0.0", port=port)
