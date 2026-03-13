@@ -7,7 +7,7 @@ from web3 import Web3
 from dotenv import load_dotenv
 
 # --------------------------------------------------
-# Load environment variables
+# Load environment
 # --------------------------------------------------
 
 load_dotenv()
@@ -31,13 +31,13 @@ if not CHAT_ID:
     raise Exception("Missing CHAT_ID")
 
 # --------------------------------------------------
-# Flask app
+# Flask
 # --------------------------------------------------
 
 app = Flask(__name__)
 
 # --------------------------------------------------
-# Web3 setup
+# Web3
 # --------------------------------------------------
 
 w3 = Web3(Web3.HTTPProvider(ALCHEMY_RPC))
@@ -57,33 +57,19 @@ contract = w3.eth.contract(
 db = sqlite3.connect("jobs.db", check_same_thread=False)
 
 db.execute("""
-CREATE TABLE IF NOT EXISTS jobs(
-    job_id TEXT,
-    payout TEXT,
-    duration INTEGER,
-    ipfs TEXT,
-    details TEXT
+CREATE TABLE IF NOT EXISTS events(
+    event_name TEXT,
+    block_number TEXT,
+    tx_hash TEXT,
+    data TEXT
 )
 """)
 
 db.commit()
 
 # --------------------------------------------------
-# Helper functions
+# Helpers
 # --------------------------------------------------
-
-def fetch_ipfs(uri):
-
-    if uri.startswith("ipfs://"):
-        uri = uri.replace("ipfs://", "https://ipfs.io/ipfs/")
-
-    try:
-        r = requests.get(uri, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print("IPFS fetch failed:", e)
-        return {}
 
 def send_telegram(message):
 
@@ -102,6 +88,7 @@ def send_telegram(message):
     except Exception as e:
         print("Telegram send failed:", e)
 
+
 def verify_alchemy_signature():
 
     if not ALCHEMY_SIGNATURE:
@@ -113,12 +100,29 @@ def verify_alchemy_signature():
         abort(403)
 
 # --------------------------------------------------
+# Decode log using ABI
+# --------------------------------------------------
+
+def decode_event(log):
+
+    for event in contract.events:
+
+        try:
+            decoded = event().process_log(log)
+            return decoded
+        except Exception:
+            continue
+
+    return None
+
+# --------------------------------------------------
 # Routes
 # --------------------------------------------------
 
 @app.route("/")
 def health():
     return "AGI watcher running"
+
 
 @app.route("/alchemy", methods=["POST"])
 def webhook():
@@ -141,62 +145,44 @@ def webhook():
         if not log:
             continue
 
-        print("Processing log:", log)
+        decoded = decode_event(log)
 
-        try:
-            decoded = contract.events.JobCreated().process_log(log)
-        except Exception as e:
-            print("Log not JobCreated event:", e)
+        if not decoded:
+            print("Unknown log:", log)
             continue
 
-        try:
-            jobSpecURI = decoded["args"]["_jobSpecURI"]
-            payout_raw = decoded["args"]["_payout"]
-            duration = decoded["args"]["_duration"]
-            details = decoded["args"]["_details"]
-        except Exception as e:
-            print("Event decoding failed:", e)
-            continue
+        event_name = decoded["event"]
+        args = decoded["args"]
 
-        payout = w3.from_wei(payout_raw, "ether")
+        print("Event detected:", event_name)
 
-        spec = fetch_ipfs(jobSpecURI)
+        tx_hash = log.get("transactionHash")
+        block_number = log.get("blockNumber")
 
-        try:
-            db.execute(
-                "INSERT INTO jobs VALUES (?,?,?,?,?)",
-                (
-                    spec.get("id", "unknown"),
-                    str(payout),
-                    duration,
-                    jobSpecURI,
-                    details
-                )
+        db.execute(
+            "INSERT INTO events VALUES (?,?,?,?)",
+            (
+                event_name,
+                block_number,
+                tx_hash,
+                json.dumps(args)
             )
-            db.commit()
-        except Exception as e:
-            print("Database write failed:", e)
+        )
 
-        title = spec.get("title", "New Job")
-        summary = spec.get("summary", "")
+        db.commit()
 
         message = f"""
-🚨 *NEW AGI JOB*
+🚨 *AGI EVENT*
 
-*Title:* {title}
+*Event:* {event_name}
 
-*Summary:*  
-{summary}
+*Block:* {block_number}
 
-*Details:*  
-{details}
+*Transaction:*  
+{tx_hash}
 
-*Payout:* {payout}
-
-*Duration:* {duration}
-
-*IPFS:*  
-{jobSpecURI}
+*Data:*  
+{json.dumps(args, indent=2)}
 """
 
         send_telegram(message)
@@ -204,7 +190,7 @@ def webhook():
     return "ok"
 
 # --------------------------------------------------
-# Render / production startup
+# Start server
 # --------------------------------------------------
 
 if __name__ == "__main__":
