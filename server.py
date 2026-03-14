@@ -13,6 +13,8 @@ CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ALCHEMY_SIGNATURE = os.getenv("ALCHEMY_SIGNATURE")
+THREAD_ID = os.getenv("THREAD_ID")
+
 
 app = Flask(__name__)
 
@@ -85,6 +87,7 @@ def send_telegram(message):
             url,
             json={
                 "chat_id": CHAT_ID,
+                "message_thread_id": THREAD_ID,
                 "text": message,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": False
