@@ -13,7 +13,7 @@ CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ALCHEMY_SIGNATURE = os.getenv("ALCHEMY_SIGNATURE")
-THREAD_ID = os.getenv("THREAD_ID")
+THREAD_ID = int(os.getenv("THREAD_ID"))
 
 
 app = Flask(__name__)
@@ -192,7 +192,7 @@ def webhook():
         # --------------------------------------------------
 
         job_id = args.get("jobId")
-        payout = int(args.get("payout"))
+        payout = int(args.get("payout", 0))
         duration = int(args.get("duration"))
         job_spec_uri = args.get("jobSpecURI")
 
@@ -272,7 +272,11 @@ def webhook():
 <a href="{tx_link}">{tx_hash}</a>
 """
 
+        if len(message) > 4000:
+            message = message[:3900] + "\n\n... truncated"
+
         send_telegram(message)
+
 
     return "ok"
 
